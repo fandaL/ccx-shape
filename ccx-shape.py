@@ -175,6 +175,249 @@ def read_frd(file_i):
             sensitivities["senstre"] = {}
             sensitivity_reading = sensitivities["senstre"]
         elif line[:12] == " -4  SENFREQ":
+
+cpu_threads = "all"  # "all" - use all processor threads, N - will use N number of processor threads
+
+max_node_shift = 0.02  # maximal node shift during one iteration in length units
+
+sign = -1 # -1 for minimization
+          # 1 for maximization
+sensitivity_to_use = "prjgrad"  # sensitivity used to shift nodes
+                                # "prjgrad" - projected gradient (combines other objectives and constraints)
+                                # "senmass" - mass
+                                # "senstre" - stress
+                                # "sendisa" - displacement
+                                # "senener" - shape energy
+                                # "senfreqN" - frequency number N where N is N-th printed frequency
+
+iterations_max = 10  # maximum number of design iterations
+# convergence criteria not yet implemented
+
+
+# FUNCTIONS
+
+import numpy as np
+import time
+import os
+import subprocess
+import multiprocessing
+
+# print ongoing messages to the log file
+def write_to_log(file_name, msg):
+    f_log = open(file_name[:-4] + ".log", "a")
+    f_log.write(msg)
+    f_log.close()
+
+
+# read initial file: design node set, node coordinates
+def import_inp(file_name):
+    nodes = {}  # dict with node positions
+    model_definition = True
+    nsets = {}
+    read_node = False
+    read_nset = False
+    nset_generate = False
+    read_design_variables = False
+
+    try:
+        f = open(file_name, "r")
+    except IOError:
+        msg = ("Initial file " + file_name + " not found.")
+        write_to_log(file_name, "\nERROR: " + msg + "\n")
+        raise Exception(msg)
+
+    line = "\n"
+    include = ""
+    while line != "":
+        if include:
+            line = f_include.readline()
+            if line == "":
+                f_include.close()
+                include = ""
+                line = f.readline()
+        else:
+            line = f.readline()
+        if line.strip() == '':
+            continue
+        elif line[0] == '*':  # start/end of a reading set
+            if line[0:2] == '**':  # comments
+                continue
+            if line[:8].upper() == "*INCLUDE":
+                start = 1 + line.index("=")
+                include = line[start:].strip().strip('"')
+                f_include = open(include, "r")
+                continue
+            read_node = False
+            read_nset = False
+            nset_generate = False
+
+        # reading nodes
+        if (line[:5].upper() == "*NODE") and (model_definition is True):
+            read_node = True
+            # reading nset name
+            current_nset = ""
+            line_list = line[5:].split(',')
+            for line_part in line_list:
+                if line_part.split('=')[0].strip().upper() == "NSET":
+                    current_nset = line_part.split('=')[1].strip().upper()
+
+        elif read_node is True:
+            line_list = line.split(',')
+            nn = int(line_list[0])  # node number
+            x = float(line_list[1])
+            y = float(line_list[2])
+            z = float(line_list[3])
+            nodes[nn] = np.array([x, y, z])
+            if current_nset:  # save nn to the nset
+                try:
+                    nsets[current_nset].add(nn)
+                except KeyError:
+                    nsets[current_nset] = {nn}
+
+        # reading nsets
+        elif line[:5].upper() == "*NSET":
+            line_split_comma = line.split(",")
+            if "=" in line_split_comma[1]:
+                name_member = 1
+                try:
+                    if "GENERATE" in line_split_comma[2].upper():
+                        nset_generate = True
+                except IndexError:
+                    pass
+            else:
+                name_member = 2
+                if "GENERATE" in line_split_comma[1].upper():
+                    nset_generate = True
+            member_split = line_split_comma[name_member].split("=")
+            current_nset = member_split[1].strip().upper()
+            try:
+                nsets[current_nset]
+            except KeyError:
+                nsets[current_nset] = set()
+            if nset_generate is False:
+                read_nset = True
+        elif read_nset is True:
+            for nn in line.split(","):
+                nn = nn.strip()
+                if nn.isdigit():
+                    nsets[current_nset].add(int(nn))
+                elif nn.isalpha():  # else: nn is name of a previous nset
+                    nsets[current_nset].update(nset[nn])
+        elif nset_generate is True:
+            line_split_comma = line.split(",")
+            try:
+                if line_split_comma[3]:
+                    nn_generated = list(range(int(line_split_comma[0]), int(line_split_comma[1]) + 1,
+                                              int(line_split_comma[2])))
+            except IndexError:
+                nn_generated = list(range(int(line_split_comma[0]), int(line_split_comma[1]) + 1))
+            nsets[current_nset].update(nn_generated)
+
+        elif line[:17].upper() == "*DESIGN VARIABLES" or line[:16].upper() == "*DESIGNVARIABLES":
+            if line.split('=')[-1].strip().upper() != "COORDINATE":  # type=coordinate
+                row = "Only design variables TYPE=COORDINATE is supported."
+                msg = ("\nERROR: " + row + "\n")
+                write_to_log(file_name, msg)
+                assert False, row
+            read_design_variables = True
+
+        elif read_design_variables is True:
+            design_variables = nsets[line.strip().upper()]  # list of design variable nodes
+            read_design_variables = False
+
+        elif line[:5].upper() == "*STEP":
+            model_definition = False
+    f.close()
+
+    try:
+        msg = "Number of design variables: " + str(len(design_variables)) + "\n\n"
+        write_to_log(file_name, msg)
+    except NameError:
+        row = "Design variables not found."
+        msg = ("\nERROR: " + row + "\n")
+        write_to_log(file_name, msg)
+        assert False, row
+    return nodes, design_variables
+
+
+def read_dat(file_i, write_header):
+    objectives = {}
+    read_objectives = 0
+    fn = 1  # frequency number
+
+    f = open(file_i + ".dat", "r")
+    for line in f:
+        line_split = line.split()
+        if line.replace(" ", "") == "\n":
+            read_objectives -= 1
+        elif read_objectives == 1:
+            if objective_type == "EIGENFREQUENCY":
+                objectives[objective_type + str(fn)] = float(line)  # is it eigenfrequency or eigenvalue? See ccx example transition.dat.ref
+                fn += 1
+            else:
+                objectives[objective_type] = float(line)
+        elif line[:11] == " OBJECTIVE:":
+            objective_type = line_split[1]
+            read_objectives = 2
+    f.close()
+
+    # write objectives to the log file
+    msg = ""
+    if write_header is True:
+        msg += "Objectives\n"
+        msg += "  i"
+        for obj in objectives:
+            if obj[:3] == "EIG":
+                obj_name = "EIGENVALUE" + obj[14:]
+                msg += " " + obj_name.rjust(13)
+            else:
+                msg += " " + obj.rjust(13)
+        msg += "\n"
+        write_header = False
+    msg +=  str(i).rjust(3)
+    for obj in objectives:
+        msg += " %.7e" % objectives[obj]
+    msg += "\n"
+    write_to_log(file_name, msg)
+
+    return objectives, write_header
+
+
+def read_frd(file_i):
+    f = open(file_i + ".frd", "r")
+
+    read_normals = False
+    read_sensitivities = False
+    normals = {}
+    sensitivities = {}
+    eigennumber = 0
+    for line in f:
+        # block end
+        if line[:3] == " -3":
+            read_normals = False
+            read_sensitivities = False
+
+        # reading normals
+        elif line[:9] == " -4  NORM":
+            read_normals = True
+        elif read_normals is True:
+            if line[:3] == " -1":
+                nn = int(line[3:13])
+                nx = float(line[13:25])
+                ny = float(line[25:37])
+                nz = float(line[37:49])
+                normals[nn] = np.array([nx, ny, nz])
+
+        # reading sensitivities
+        elif line[:12] == " -4  SENMASS":
+            read_sensitivities = True
+            sensitivities["senmass"] = {}
+            sensitivity_reading = sensitivities["senmass"]
+        elif line[:12] == " -4  SENSTRE":
+            read_sensitivities = True
+            sensitivities["senstre"] = {}
+            sensitivity_reading = sensitivities["senstre"]
+        elif line[:12] == " -4  SENFREQ":
             read_sensitivities = True
             eigennumber += 1
             sensitivities["senfreq" + str(eigennumber)] = {}
@@ -292,8 +535,8 @@ if cpu_threads.lower() == "all":  # use all processor cores
     cpu_threads = multiprocessing.cpu_count()
 os.putenv('OMP_NUM_THREADS', str(cpu_threads))
 
-# reading nodes form the initial file
-nodes = import_inp(file_name)
+# reading nodes and design varaibles form the initial file
+[nodes, design_variables] = import_inp(file_name)
 
 file_i = file_name[:-4]
 i = 0
