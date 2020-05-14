@@ -7,16 +7,16 @@ path = "."  # path to the working directory where the initial file is located
 #path = "~/tmp/shape/"  # Linux example
 #path = "D:\\tmp\\"  # Windows example
 
-file_name = "opt1.inp"  # initial file name
+file_name = "sensitivity_analysis.inp"  # initial file name
 path_calculix = "d:\\soft\\ccx"
 
 cpu_threads = "all"  # "all" - use all processor threads, N - will use N number of processor threads
 
-max_node_shift = 0.02  # maximal node shift during one iteration in length units
+max_node_shift = 0.3  # maximal node shift during one iteration in length units
 
-sign = -1 # -1 for minimization
-          # 1 for maximization
-sensitivity_to_use = "prjgrad"  # sensitivity used to shift nodes
+sign = -1  # -1 for minimization
+           # 1 for maximization
+sensitivity_to_use = "senstre"  # sensitivity used to shift nodes
                                 # "prjgrad" - projected gradient (combines other objectives and constraints)
                                 # "senmass" - mass
                                 # "senstre" - stress
@@ -24,7 +24,7 @@ sensitivity_to_use = "prjgrad"  # sensitivity used to shift nodes
                                 # "senener" - shape energy
                                 # "senfreqN" - frequency number N where N is N-th printed frequency
 
-iterations_max = 10  # maximum number of design iterations
+iterations_max = 30  # maximum number of design iterations
 # convergence criteria not yet implemented
 
 
@@ -217,9 +217,9 @@ def write_inp_h(file_i, file_h, boundary_shift):
             fW.write("*INCLUDE,INPUT=" + file_i + ".equ\n")
             fW.write("*BOUNDARY\n")
             for nn in boundary_shift:
-                fW.write(str(nn) + " ,1,1, " + str(boundary_shift[nn][0]) + "\n")
-                fW.write(str(nn) + " ,2,2, " + str(boundary_shift[nn][1]) + "\n")
-                fW.write(str(nn) + " ,3,3, " + str(boundary_shift[nn][2]) + "\n")
+                fW.write("{} ,1,1, {:.13e}\n".format(nn, boundary_shift[nn][0]))
+                fW.write("{} ,2,2, {:.13e}\n".format(nn, boundary_shift[nn][1]))
+                fW.write("{} ,3,3, {:.13e}\n".format(nn, boundary_shift[nn][2]))
             fW.write("*STEP\n")
             fW.write("*STATIC\n")
             fW.write("*NODE FILE\n")
@@ -267,7 +267,7 @@ def rewrite_input(file_name, file_i, nodes):
         elif rewrite_node is True:
             line_list = line.split(',')
             nn = int(line_list[0])
-            fW.write(str(nn) + ", " + str(nodes[nn][0]) + ", " + str(nodes[nn][1]) + ", " + str(nodes[nn][2]) + "\n")
+            fW.write("{}, {:.13e}, {:.13e}, {:.13e}\n".format(nn, nodes[nn][0], nodes[nn][1], nodes[nn][2]))
             continue
         elif line[:5].upper() == "*STEP":
             model_definition = False
@@ -328,6 +328,10 @@ while True:
 
     # read frd: update node positions by helper displacement
     nodes = read_frd_h(file_h, nodes)
+    # delete unecessary files
+    os.remove(file_h + ".12d")
+    os.remove(file_h + ".sta")
+    os.remove(file_h + ".cvg")
 
     # write new iteration file with shifted nodes from helper analysis
     i += 1

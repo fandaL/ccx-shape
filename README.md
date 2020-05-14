@@ -30,8 +30,35 @@ In the example folder there is an input file for stress minimization of the part
 
 ![preprocessing.png](https://github.com/fandaL/ccx-shape/blob/master/example1/preprocessing.png)
 
+Static analysis was prepared in FreeCAD, which generated CalculiX input file. Two blocks were added to this file. First, in the model definition, coordinate design variables are defined with nset
+
+```
+*Nset, nset=DESIGNNODES
+1, 2, 2049, 2050, 2051, 2052, 2053, 2054,
+2055, 2056, 2057, 2058, 13, 14, 15, 16,
+(...)
+*DESIGNVARIABLES,TYPE=COORDINATE
+DESIGNNODES
+```
+
+Second, after original static analysis step, new sensitivity analysis step is defined to calculate stress sensitivity of design variables defined above. Filter is also applied before.
+
+```
+*STEP
+*SENSITIVITY
+*OBJECTIVE
+STRESS,DESIGNNODES,10.,200.
+*FILTER,TYPE=LINEAR,DIRECTION WEIGHTING=YES
+3.
+*NODE FILE
+SEN
+*END STEP
+```
+
 ![initial_analysis_vonMises.png](https://github.com/fandaL/ccx-shape/blob/master/example1/initial_analysis_vonMises.png)
 
 Figure with result mesh below is for optimization settings 'max_node_shift = 0.3' and 'sign = -1' and 'sensitivity_to_use = "senstre"' and 'iterations_max = 30'
 
 ![last_analysis_vonMises.png](https://github.com/fandaL/ccx-shape/blob/master/example1/last_analysis_vonMises.png)
+
+Optimization did all 30 iterations (mesh distortion did not make CalculiX to fail earlier). Stress concentration dropped down from 209 MPa to 131 MPa.
