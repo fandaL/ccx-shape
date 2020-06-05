@@ -23,9 +23,13 @@ sensitivity_to_use = "senstre"  # sensitivity used to shift nodes
                                 # "sendisa" - displacement
                                 # "senener" - shape energy
                                 # "senfreqN" - frequency number N where N is N-th printed frequency
+# move_limit = [[min, max cumulative node shift along normal, {node numbers}], [another set],...]
+               # min must be <= 0, max must be >= 0
+               # e.g. move_limit = [[0, 5, {1,2,3,4,5,6}]] will constrain shift of the nodes 1,2,3,4,5,6 to be minimally 0 and maximally 5 length units
+move_limit = []
 
 iterations_max = 30  # maximum number of design iterations
-# convergence criteria not yet implemented
+convergence_tolerance = 0.0001  # stop iteration if change in objectives is below this value, None - not to use it
 
 
 # FUNCTIONS
@@ -288,7 +292,7 @@ write_to_log(file_name, msg)
 
 
 # set an environmental variable driving number of cpu threads to be used by CalculiX
-if cpu_threads.lower() == "all":  # use all processor cores
+if cpu_threads == "all":  # use all processor cores
     cpu_threads = multiprocessing.cpu_count()
 os.putenv('OMP_NUM_THREADS', str(cpu_threads))
 
@@ -298,24 +302,73 @@ nodes = import_inp(file_name)
 file_i = file_name[:-4]
 i = 0
 write_header = True
+cumulative_shift = {}
+for lb, ub, ns in move_limit:
+    for nn in ns:
+        cumulative_shift[nn] = 0
 while True:
     # running initial CalculiX analysis
     subprocess.call(os.path.normpath(path_calculix) + " " + file_i, shell=True, cwd=path)
 
     # read dat: objectives (i.e. goal function and constraint values) and save them to the log
+    if i != 0:
+        objectives_old = objectives
     [objectives, write_header] = read_dat(file_i, write_header)
+    if not objectives:
+        msg = "\nObjectives not found in *.frd output. The mesh could be already too distorted."
+        print(msg)
+        write_to_log(file_name, msg)
+        break
+
+    # delete unecessary files
+    #os.remove(file_i + ".12d")
+    #os.remove(file_i + ".stm")
+    #os.remove(file_i + ".sta")
+    #os.remove(file_i + ".equ")
+    #os.remove(file_i + ".cvg")
 
     # convergence check
     if i > iterations_max:
         break
+    if i != 0 and convergence_tolerance:
+        converged = []
+        for obj in objectives:
+            if abs(objectives[obj] - objectives_old[obj]) > convergence_tolerance:
+                converged.append(False)
+        if False not in converged:
+            print("Objectives change lower than convergence_tolerance")
+            break
 
     # read frd: node normals, sensitivities
     [normals, sensitivities] = read_frd(file_i)
 
     # define boundary shift
     boundary_shift = {}
+    continue2 = False
     for nn in sensitivities[sensitivity_to_use]:
-        if sensitivities[sensitivity_to_use][nn]:
+        sens_nn = sensitivities[sensitivity_to_use][nn]
+        if sens_nn:
+            for lb, ub, ns in move_limit:
+                if nn in ns:
+                    if sign * sens_nn > 0:  # wants to grow
+                        free_shift = ub - cumulative_shift[nn]
+                        if max_node_shift <= free_shift:
+                            final_shift = max_node_shift
+                        else:
+                            final_shift = free_shift
+                    elif sign * sens_nn < 0:  # wants to reduce
+                        free_shift = lb - cumulative_shift[nn]  # < 0
+                        if -max_node_shift >= free_shift:
+                            final_shift = max_node_shift
+                        else:
+                            final_shift = free_shift
+                    boundary_shift[nn] = normals[nn] * sign * sens_nn * final_shift
+                    cumulative_shift[nn] += sign * sens_nn * final_shift
+                    continue2 = True
+                    break
+            if continue2 == True:
+                continue2 = False
+                continue
             boundary_shift[nn] = normals[nn] * sign * sensitivities[sensitivity_to_use][nn] * max_node_shift
 
     # write helper linear static analysis with displacement output
